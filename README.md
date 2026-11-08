@@ -9,6 +9,10 @@
   Limited-Endurance. Sau đó test với dataset đã sinh.
 - Task 2: Cài thêm một số thuật toán phổ biến (Thực hiện khi xong task 1).
 
+# Paper tham khảo:
+
+Đặt trong thư mục docs/papers
+
 # Bộ instance RescueNet
 
 Bộ dữ liệu gồm **40.446 instance K=6**, lưới 50×50: **8.091 val** và **32.355 test**.
