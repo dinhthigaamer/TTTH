@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deadline-constrained Multi-UAV Risk Coverage instance",
+  "type": "object",
+  "required": [
+    "name",
+    "source",
+    "grid",
+    "K",
+    "D",
+    "eta",
+    "uavs",
+    "rho"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "object"
+    },
+    "grid": {
+      "type": "object",
+      "required": [
+        "m",
+        "n",
+        "u",
+        "w"
+      ],
+      "properties": {
+        "m": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "n": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "u": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "w": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "K": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "D": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "eta": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1
+    },
+    "uavs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "depot",
+          "B",
+          "v_h",
+          "e_h",
+          "tau",
+          "eps"
+        ],
+        "properties": {
+          "depot": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "integer",
+                "minimum": 0
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "B": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "v_h": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "e_h": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "tau": {
+            "type": "number",
+            "minimum": 0
+          },
+          "eps": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "rho": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      }
+    }
+  },
+  "additionalProperties": false
+}

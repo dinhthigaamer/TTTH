@@ -1,0 +1,6 @@
+# Preserve exact config bytes because generated datasets record their SHA-256.
+/configs/*.json -text
+# Other new source/manifest files use stable LF endings across OSes.
+/configs/*.csv text eol=lf
+/scripts/*.py text eol=lf
+/tests/*.py text eol=lf

@@ -1,0 +1,19 @@
+# Local datasets, generated instances, archives and reproducible reports
+data/
+outputs/
+
+# Local references excluded from the instance handoff
+/scripts/split_rescuenet.py
+/notebooks/
+/docs/papers/*.pdf
+
+# Python environments and generated caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Interrupted atomic writes
+*.part
