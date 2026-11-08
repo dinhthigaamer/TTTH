@@ -41,10 +41,12 @@ class Instance:
 
     def __post_init__(self):
         self.w = np.asarray(self.w, dtype=float)
-        assert self.w.ndim == 2 and (self.w >= 0).all(), "w phải là ma trận không âm"
+        assert self.w.ndim == 2 and (
+            self.w >= 0).all(), "w phải là ma trận không âm"
         assert 0 < self.eta <= 1
         for k, a in enumerate(self.uavs):
-            assert 0 <= a.depot[0] < self.m and 0 <= a.depot[1] < self.n, f"depot UAV {k} ngoài lưới"
+            assert 0 <= a.depot[0] < self.m and 0 <= a.depot[
+                1] < self.n, f"depot UAV {k} ngoài lưới"
 
     @property
     def m(self) -> int:
@@ -67,7 +69,8 @@ class Instance:
 class Solution:
     name: str
     routes: List[List[Cell]]                       # R_k: dãy ô được quan sát
-    walks: Optional[List[List[Cell]]] = None       # đường bay thực lúc lập kế hoạch (gồm ô chỉ bay qua)
+    # đường bay thực lúc lập kế hoạch (gồm ô chỉ bay qua)
+    walks: Optional[List[List[Cell]]] = None
 
 
 def neighbors8(cell: Cell, m: int, n: int) -> Iterator[Cell]:
@@ -119,7 +122,8 @@ def evaluate(inst: Instance, routes: List[List[Cell]]) -> Dict:
             violations.append(f"UAV {k}: T_L={T:.2f} > D={inst.D:.2f} (C1)")
         if E > cap + TOL:
             violations.append(f"UAV {k}: E={E:.2f} > eta*B={cap:.2f} (C2)")
-        per_uav.append(dict(cells=len(r), time=T, energy=E, battery_use=E / cap if cap > 0 else 0.0))
+        per_uav.append(dict(cells=len(r), time=T, energy=E,
+                       battery_use=E / cap if cap > 0 else 0.0))
         for c in r:
             covered[c] = True
         total_visits += len(r)
@@ -187,7 +191,8 @@ class UAVState:
 # --------------------------------------------------------------------------- #
 # Khung chạy nhiều UAV dùng chung tập CLOSE (các UAV thay phiên đi từng bước)
 # --------------------------------------------------------------------------- #
-Action = Optional[Tuple[str, Cell]]            # ("observe", cell) | ("transit", cell) | None
+# ("observe", cell) | ("transit", cell) | None
+Action = Optional[Tuple[str, Cell]]
 StepFn = Callable[[Instance, UAVState, np.ndarray], Action]
 
 
@@ -196,7 +201,8 @@ def run_shared_closed(inst: Instance, step_fn: StepFn, name: str) -> Solution:
     Mỗi vòng, mỗi UAV còn hoạt động đi đúng 1 bước do `step_fn` quyết định; trả None thì UAV dừng."""
     closed = np.zeros((inst.m, inst.n), dtype=bool)
     states = [UAVState(inst, k) for k in range(inst.K)]
-    max_rounds = 50 * inst.m * inst.n + 100          # chặn an toàn; thực tế pin đã giới hạn số bước
+    # chặn an toàn; thực tế pin đã giới hạn số bước
+    max_rounds = 50 * inst.m * inst.n + 100
     for _ in range(max_rounds):
         if not any(s.active for s in states):
             break
@@ -229,11 +235,13 @@ def make_random_instance(m: int = 30, n: int = 30, K: int = 3, seed: int = 0, u:
     for _ in range(max(3, (m * n) // 150)):
         ci, cj = rng.uniform(0, m), rng.uniform(0, n)
         s = rng.uniform(0.04, 0.12) * max(m, n)
-        w += rng.uniform(0.5, 1.0) * np.exp(-((ii - ci) ** 2 + (jj - cj) ** 2) / (2 * s * s))
+        w += rng.uniform(0.5, 1.0) * np.exp(-((ii - ci) **
+                                              2 + (jj - cj) ** 2) / (2 * s * s))
     w += 0.05 * rng.random((m, n))
     w = np.clip(w / w.max(), 0, 1)
     max_cells = flight_budget_m / u
-    B = eta ** -1 * (e_h * flight_budget_m + eps * max_cells)      # pin đủ cho ~flight_budget_m mét
+    # pin đủ cho ~flight_budget_m mét
+    B = eta ** -1 * (e_h * flight_budget_m + eps * max_cells)
     D = flight_budget_m / v_h + tau * max_cells
     uavs = [UAV(depot=(int(rng.integers(m)), int(rng.integers(n))), B=B, v_h=v_h, e_h=e_h, tau=tau, eps=eps)
             for _ in range(K)]
