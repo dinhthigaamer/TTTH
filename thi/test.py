@@ -7,8 +7,14 @@ from heu_greedy import heu_greedy
 from zigzag import zigzag
 import os
 import pandas as pd
+from pathlib import Path
+from tqdm import tqdm
 
-PAR_PATH = '../../instances'
+PAR_PATH = {
+    '../../instances': 'summary_under_50.csv',
+    '../../rescuenet_50x50/test': 'summary_50x50.csv',
+    '../../rescuenet_100x100/test': 'summary_100x100.csv',
+}
 
 
 def read_instance(file_path):
@@ -45,9 +51,9 @@ def summarize_solution():
         "zigzag": []
     }
 
-    for file in os.listdir(PAR_PATH):
-        if file.endswith('.json'):
-            file_path = os.path.join(PAR_PATH, file)
+    for path, summary_file in PAR_PATH.items():
+        for file in tqdm(Path(path).rglob('*.json'), desc=f"Processing files in {path}"):
+            file_path = file
             instance = extract_instance_data(read_instance(file_path))
 
             sol_svrec = svrec(instance)
@@ -69,9 +75,9 @@ def summarize_solution():
             res['zigzag'].append(res_zigzag['f'])
             # print(f"Instance: {file}, Evaluation Result: {res}")
 
-    df = pd.DataFrame({'Instance': files, 'svrec': res['svrec'], 'na_greedy': res['na_greedy'],
-                      'heu_greedy': res['heu_greedy'], 'zigzag': res['zigzag']})
-    df.to_csv('solution_summary.csv', index=False)
+        df = pd.DataFrame({'Instance': files, 'svrec': res['svrec'], 'na_greedy': res['na_greedy'],
+                           'heu_greedy': res['heu_greedy'], 'zigzag': res['zigzag']})
+        df.to_csv(summary_file, index=False)
 
 
 def main():
