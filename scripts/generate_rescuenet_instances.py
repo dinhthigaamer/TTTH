@@ -1,13 +1,13 @@
 """Generate RescueNet inputs using zig-zag-normalized energy/time budgets.
 
-One image -> one 50x50 risk map -> K=6 x 3 budget levels x 3 depot seeds.
-Configuration is in configs/rescuenet_instances.json. Source splits stay frozen.
+Only images with nine verified 10-50% optimum-coverage cases are written.
+Unselected images are indexed separately; no exception instances are generated.
+Use --grid-size 50 or 100. Source splits stay frozen.
 """
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 import csv
 import hashlib
-import itertools
 import json
 import os
 from pathlib import Path
@@ -18,16 +18,16 @@ import pandas as pd
 from PIL import Image
 from jsonschema import Draft202012Validator
 
-from validate_instances import (ROOT,CONFIG,SOURCE_MANIFEST,DEFAULT_DATA,load_config,validate_instance,
-                                evaluate_routes,depot_for,depots_for,budget_parameters,build_uavs)
+from validate_instances import (ROOT,SOURCE_MANIFEST,load_config,validate_instance,
+                                evaluate_routes,depots_for,budget_parameters,build_uavs,config_path_for)
 
-M=N=50
-CELL=60
 SQUARE=3000
-DENOMINATOR=72000
 
 
-def native_to_grid(mask,rho_scaled):
+def native_to_grid(mask,rho_scaled,grid_size=50):
+    if grid_size not in (50,100):
+        raise ValueError('Supported grid sizes are 50 and 100')
+    cell=SQUARE//grid_size
     a=np.asarray(mask)
     if a.ndim!=2 or a.dtype.kind not in 'iu' or a.min()<0 or a.max()>10:
         raise ValueError('Expected integer mask IDs 0..10')
@@ -36,12 +36,15 @@ def native_to_grid(mask,rho_scaled):
         raise ValueError('Mask smaller than 3000x3000')
     x,y=(w-SQUARE)//2,(h-SQUARE)//2
     crop=a[y:y+SQUARE,x:x+SQUARE]
-    numerator=rho_scaled[crop].reshape(M,CELL,N,CELL).sum(axis=(1,3),dtype=np.uint32)
+    numerator=rho_scaled[crop].reshape(grid_size,cell,grid_size,cell).sum(axis=(1,3),dtype=np.uint32)
     return numerator,[x,y,SQUARE,SQUARE]
 
 
 def weights_from_numerators(numerators):
-    return np.round(numerators.astype(float)/DENOMINATOR,12)
+    if numerators.shape not in ((50,50),(100,100)):
+        raise ValueError('Unexpected risk grid shape')
+    denominator=20*(SQUARE//numerators.shape[0])**2
+    return np.round(numerators.astype(float)/denominator,12)
 
 
 def weight_vectors(config):
@@ -67,86 +70,25 @@ def read_source():
 
 def greedy_routes(instance):
     """Deterministic greedy for calibration/evaluation; not an optimum."""
+    u=instance['grid']['u']
     w=np.asarray(instance['grid']['w']);cells=np.column_stack(np.nonzero(w>0))
     values=w[cells[:,0],cells[:,1]] if len(cells) else np.array([])
     available=np.ones(len(cells),dtype=bool);routes=[]
     for craft in instance['uavs']:
         cur=np.array(craft['depot']);route=[];flown=arrival=0.
-        back=40*np.linalg.norm(cells-cur,axis=1)
+        back=u*np.linalg.norm(cells-cur,axis=1)
         while available.any():
-            distance=40*np.linalg.norm(cells-cur,axis=1)
+            distance=u*np.linalg.norm(cells-cur,axis=1)
             t=arrival+distance/craft['v_h']+(craft['tau'] if route else 0)
             e=craft['e_h']*(flown+distance+back)+(len(route)+1)*craft['eps']
             feasible=available&(t<=instance['D']+1e-9)&(e<=instance['eta']*craft['B']+1e-9)
             if not feasible.any():
                 break
-            best=int(np.argmax(np.where(feasible,values/(distance/40+1),-np.inf)))
+            best=int(np.argmax(np.where(feasible,values/(distance/u+1),-np.inf)))
             flown+=float(distance[best]);arrival=float(t[best]);cur=cells[best]
             route.append(cur.tolist());available[best]=False
         routes.append(route)
     return routes
-
-
-def calibrate_budgets(config,source,max_maps=32):
-    """Optional new calibration using val only, all 3 distinct-depot seeds."""
-    _,scaled=weight_vectors(config)
-    selected=[]
-    val=source[source.split=='val'].sample(frac=1,random_state=42)
-    for group_id,group in val.groupby('group_id',sort=False):
-        for row in group.to_dict('records'):
-            with Image.open(ROOT/row['merged_mask_path']) as im:
-                w=weights_from_numerators(native_to_grid(im,scaled)[0])
-            if w.sum()>0:
-                selected.append((row['id'],group_id,w));break
-        if len(selected)==max_maps:
-            break
-    if len(selected)<12:
-        raise ValueError('Too few positive val groups for calibration')
-    candidates={6:[.075,.09,.1,.11,.125,.15,.175,.2,.225,.24,.25,.275]}
-    samples=[];chosen_by_K={};selected_stats=[]
-    for K in config['K_values']:
-        for fraction in candidates[K]:
-            for seed in config['seeds']:
-                for image_id,group_id,w in selected:
-                    depot=depot_for(image_id,seed)
-                    B,D,_=budget_parameters(config,K,fraction,depot)
-                    instance={'grid':{**config['grid'],'w':w.tolist()},'K':K,'D':D,'eta':config['eta'],
-                              'uavs':build_uavs(config,K,B,depots_for(image_id,seed,K))}
-                    result=evaluate_routes(instance,greedy_routes(instance))
-                    samples.append({'K':K,'fraction':fraction,'seed':seed,'coverage':result['risk_coverage']})
-            recent=pd.DataFrame(samples).query('K==@K and fraction==@fraction')
-            print(f'Val K={K}, fraction={fraction}: '+str(recent.groupby('seed').coverage.median().round(4).to_dict()),flush=True)
-        data=pd.DataFrame(samples).query('K==@K')
-        med=data.groupby(['fraction','seed']).coverage.median().unstack()
-        eligible=[float(f) for f in med.index if med.loc[f].between(.1,.5).all()]
-        if len(eligible)<3:
-            raise ValueError(f'Need at least 3 fractions with 10-50% median for all seeds at K={K}; got {eligible}')
-        targets=[.15,.30,.45]
-        options=[]
-        for triple in itertools.combinations(eligible,3):
-            loss=sum(float(((med.loc[f].to_numpy()-target)**2).sum()) for f,target in zip(triple,targets))
-            options.append((loss,triple))
-        chosen_by_K[K]=list(min(options)[1])
-        for label,fraction in zip(['low','medium','high'],chosen_by_K[K]):
-            sub=data[data.fraction==fraction]
-            selected_stats.append({'K':K,'level':label,'fraction':fraction,
-                                   'median_risk_coverage':float(sub.coverage.median()),
-                                   'median_by_seed':{str(seed):float(med.loc[fraction,seed]) for seed in config['seeds']},
-                                   'share_cases_in_10_to_50pct':float(sub.coverage.between(.1,.5).mean())})
-    config['budget_levels']=[{'name':name,'fractions_by_K':{str(K):chosen_by_K[K][i] for K in config['K_values']}}
-                             for i,name in enumerate(['low','medium','high'])]
-    config['calibration']={'split':'val_only','positive_maps':len(selected),
-        'image_ids':[i for i,g,w in selected],'group_ids':[g for i,g,w in selected],
-        'seeds':config['seeds'],'candidate_fractions_by_K':{str(k):v for k,v in candidates.items()},
-        'cases_checked':len(samples),'selected_levels':selected_stats,
-        'method':'greedy gain/(distance_in_cells+1); every route independently checked',
-        'allocation_during_search':config['battery_allocation'],
-        'depot_allocation_during_search':config['depot_allocation'],
-        'selection':'eligible if per-seed median is 10-50%; minimize squared differences to 15/30/45% targets',
-        'interpretation':'K6 distinct-depot val calibration; test never used for parameter selection',
-        'limitation':'heuristic val pilot; not an optimum and not a 10-50% guarantee for each image'}
-    print('Chosen budget levels: '+json.dumps(config['budget_levels']),flush=True)
-    return config
 
 
 def write_identical_or_new(path,payload):
@@ -172,165 +114,185 @@ def encode_instance(data,encoded_grid):
     return ('{\n'+',\n'.join(entries)+'\n}\n').encode('utf-8')
 
 
-def main():
-    parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output',type=Path,default=DEFAULT_DATA)
-    parser.add_argument('--workers',type=int,default=6)
-    parser.add_argument('--calibrate-only',action='store_true',help='Choose budget fractions on val and update config only')
-    args=parser.parse_args()
-    if args.workers<1:
-        parser.error('workers must be positive')
-    config=load_config();source=read_source()
-    if config['seeds']!=[42,43,44] or config['K_values']!=[6] or config['grid']!={'m':50,'n':50,'u':40}:
-        raise ValueError('Expected agreed K=6, three seeds 42/43/44, 50x50, u=40')
-    if args.calibrate_only:
-        config=calibrate_budgets(config,source)
-        CONFIG.write_text(json.dumps(config,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-        return
+def create_image(task):
+    """Write nothing unless all nine cases have valid coverage certificates."""
+    row,config,base=task
+    base=Path(base);size=config['grid']['m'];cell=SQUARE//size
     vector,scaled=weight_vectors(config)
-    levels=config['budget_levels'];seeds=config['seeds']
-    if len(levels)!=3 or any('fractions_by_K' not in level for level in levels):
-        raise ValueError('Calibrate three budget levels before generation')
-    designs=[{'K':K,'level':level['name'],'fraction':float(level['fractions_by_K'][str(K)]),
-              'profile':f'K{K}_b{level["name"]}'}
-             for K in config['K_values'] for level in levels]
-    expected_per_image=len(designs)*len(seeds)
-    base=args.output.resolve();base.mkdir(parents=True,exist_ok=True)
-    config_hash=hashlib.sha256(CONFIG.read_bytes()).hexdigest()
-    if (base/'summary.json').exists() and json.loads((base/'summary.json').read_text(encoding='utf-8'))['config_sha256']!=config_hash:
-        raise ValueError('Existing dataset uses another config; move it aside before generating')
-    for split in ['val','test']:
-        for d in designs:(base/split/d['profile']).mkdir(parents=True,exist_ok=True)
-    schema=Draft202012Validator(json.loads((ROOT/'docs/instance.schema.json').read_text(encoding='utf-8')))
+    with Image.open(ROOT/row['mask_path']) as im:
+        im.load();raw=np.asarray(im);mask_hash=hashlib.sha256(im.tobytes()).hexdigest()
+        numerators,crop=native_to_grid(raw,scaled,size)
+    if mask_hash!=row['mask_sha256']:
+        raise ValueError(f'Native mask differs from frozen source: {row["id"]}')
+    w=weights_from_numerators(numerators)
+    for i,j in [(0,0),(size//2,size//2),(size-1,size-1),(7,31),(43,12)]:
+        pixels=raw[crop[1]+cell*i:crop[1]+cell*(i+1),crop[0]+cell*j:crop[0]+cell*(j+1)]
+        if abs(np.bincount(pixels.ravel(),minlength=11)@vector/(cell*cell)-w[i,j])>5.1e-13:
+            raise ValueError('Independent native aggregation failed')
+    fingerprint=hashlib.sha256(numerators.astype('<u4').tobytes()).hexdigest()
+    total=float(w.sum());positive=int(np.count_nonzero(w))
+    from coverage_certificate import certify_seed,impossibility_certificate
+    failures={};obstructions={};seed_designs={}
+    for seed in config['seeds']:
+        proof=impossibility_certificate(config,w,depots_for(row['id'],seed,6,size,size))
+        if proof:obstructions[str(seed)]=proof;failures[str(seed)]=proof['reason']
+    if not obstructions:
+        for seed in config['seeds']:
+            result,reason=certify_seed(config,w,depots_for(row['id'],seed,6,size,size))
+            if result is None:
+                import copy
+                legacy=copy.deepcopy(config)
+                legacy['coverage_certification'].update(upper_bound='reachable_top_weights_v1',upper_search_percent=49,upper_search_steps=18,
+                    independent_energy_candidates=[],level_factor_candidates=[[.6,.8,1.],[.85,.925,1.],[.95,.975,1.]])
+                result,reason=certify_seed(legacy,w,depots_for(row['id'],seed,6,size,size))
+            if result is None:failures[str(seed)]=reason
+            else:seed_designs[seed]=result
+    if failures:
+        excluded={'grid_size':size,'image_id':row['id'],'source_split':row['split'],
+            'group_id':row['group_id'],'image_path':row['image_path'],'mask_path':row['mask_path'],
+            'status':'proven_incompatible' if obstructions else 'not_certified',
+            'reason_by_seed':json.dumps(failures,sort_keys=True,separators=(',',':')),
+            'impossibility_proofs':json.dumps(obstructions,sort_keys=True,separators=(',',':')),
+            'mask_sha256':mask_hash,'grid_sha256':fingerprint}
+        return [],total==0,[],excluded
+    grid={**config['grid'],'w':[[0 if v==0 else float(v) for v in line] for line in w]}
+    encoded_grid=('{\n'+f'    "m": {size},\n    "n": {size},\n    "u": 40,\n    "w": [\n'+
+        ',\n'.join('      '+json.dumps(line,separators=(',',':'),allow_nan=False) for line in grid['w'])+'\n    ]\n  }')
+    ii,jj=np.indices((size,size));records=[];certificates=[]
+    for seed in config['seeds']:
+        depots=depots_for(row['id'],seed,6,size,size)
+        for level,proof in zip(config['budget_levels'],seed_designs[seed]):
+            alpha=proof['alpha'];time_alpha=proof.get('time_alpha',alpha)
+            B,D,reference=budget_parameters(config,6,alpha,depots[0],time_alpha)
+            fleet=build_uavs(config,6,B,depots);capacities=[c['B'] for c in fleet]
+            name=f'rescuenet_{row["id"]}_{size}x{size}_K6_b{level["name"]}_s{seed}'
+            data={'name':name,'source':{
+                'dataset':'RescueNet','image_id':row['id'],'split':row['split'],'original_split':row['original_split'],
+                'group_id':row['group_id'],'image_path':row['image_path'],'mask_path':row['mask_path'],
+                'seed':seed,'budget_level':level['name'],'budget_fraction':alpha,'budget_time_fraction':time_alpha,
+                'budget_reference':reference,'budget_rule':config['budget_rule'],
+                'battery_multipliers':config['battery_allocation']['multipliers_by_K']['6'],
+                'depot_policy':config['depot_allocation'],'crop_xywh':crop,'cell_pixels':[cell,cell],
+                'aggregation':'mean_pixel_rho','mask_sha256':mask_hash,'grid_sha256':fingerprint,
+                'config_version':config['version'],'case_set':'benchmark','zero_risk':False,
+                'scale_assumption':'u=40m is a simulation scale, not georeferenced image scale'},
+                'K':6,'D':D,'eta':config['eta'],'uavs':fleet,'rho':config['rho']}
+            validate_instance(dict(data,grid=grid))
+            payload=encode_instance(data,encoded_grid)
+            relative=Path(row['split'])/f'K6_b{level["name"]}'/f'{name}.json'
+            write_identical_or_new(base/relative,payload)
+            certificates.append({'instance':name,'case_set':'benchmark','input_sha256':hashlib.sha256(payload).hexdigest(),
+                **{k:proof[k] for k in ['lower_ticks','upper_ticks','total_ticks','max_cells_per_uav','method']},
+                'solution':{'instance':name,'algorithm':'certificate_sweep_or_local_greedy_v1','routes':proof['routes']}})
+            reachable=np.zeros((size,size),dtype=bool)
+            for craft in fleet:
+                distance=40*np.hypot(ii-craft['depot'][0],jj-craft['depot'][1])
+                reachable|=(distance/craft['v_h']<=D+1e-9)&(2*craft['e_h']*distance+craft['eps']<=config['eta']*craft['B']+1e-9)
+            records.append({'name':name,'path':relative.as_posix(),'image_id':row['id'],'split':row['split'],
+                'profile':f'K6_b{level["name"]}','K':6,'budget_level':level['name'],'budget_fraction':alpha,
+                'budget_time_fraction':time_alpha,'B':B,'B_min':min(capacities),'B_max':max(capacities),
+                'B_team':round(sum(capacities),6),'B_values':json.dumps(capacities,separators=(',',':')),
+                'D':D,'seed':seed,'reference_depot_i':depots[0][0],'reference_depot_j':depots[0][1],
+                'depot_values':json.dumps(depots,separators=(',',':')),'reference_energy':reference['energy'],
+                'reference_time':reference['arrival_time'],'total_risk':total,'positive_cells':positive,'zero_risk':False,
+                'reachable_positive_cells':int(np.count_nonzero(reachable&(w>0))),'grid_sha256':fingerprint,'bytes':len(payload),
+                'case_set':'benchmark','certified_lower_ratio':proof['lower_ticks']/proof['total_ticks'],
+                'certified_upper_ratio':proof['upper_ticks']/proof['total_ticks']})
+    return records,False,certificates,None
 
-    def create(row):
-        with Image.open(ROOT/row['merged_mask_path']) as im:
-            im.load();raw=np.asarray(im);mask_hash=hashlib.sha256(im.tobytes()).hexdigest()
-            numerators,crop=native_to_grid(raw,scaled)
-        if mask_hash!=row['mask_sha256']:
-            raise ValueError(f'Native mask differs from frozen source: {row["id"]}')
-        w=weights_from_numerators(numerators)
-        for i,j in [(0,0),(25,25),(49,49),(7,31),(43,12)]:
-            pixels=raw[crop[1]+60*i:crop[1]+60*(i+1),crop[0]+60*j:crop[0]+60*(j+1)]
-            if abs(np.bincount(pixels.ravel(),minlength=11)@vector/3600-w[i,j])>5.1e-13:
-                raise ValueError('Independent native aggregation failed')
-        fingerprint=hashlib.sha256(numerators.astype('<u4').tobytes()).hexdigest()
-        grid={**config['grid'],'w':[[0 if v==0 else float(v) for v in line] for line in w]}
-        encoded_grid=('{\n    "m": 50,\n    "n": 50,\n    "u": 40,\n    "w": [\n'+
-                      ',\n'.join('      '+json.dumps(line,separators=(',',':'),allow_nan=False) for line in grid['w'])+
-                      '\n    ]\n  }')
-        total=float(w.sum());positive=int(np.count_nonzero(w));ii,jj=np.indices((50,50));records=[]
-        for seed in seeds:
-            depots=depots_for(row['id'],seed,6);depot=depots[0]
-            for d in designs:
-                B,D,reference=budget_parameters(config,d['K'],d['fraction'],depot)
-                fleet=build_uavs(config,d['K'],B,depots)
-                capacities=[craft['B'] for craft in fleet]
-                name=f'rescuenet_{row["id"]}_50x50_K{d["K"]}_b{d["level"]}_s{seed}'
-                data={'name':name,'source':{
-                    'dataset':'RescueNet','image_id':row['id'],'split':row['split'],'original_split':row['original_split'],
-                    'group_id':row['group_id'],'image_path':row['image_path'],'mask_path':row['mask_path'],
-                    'seed':seed,'budget_level':d['level'],'budget_fraction':d['fraction'],
-                    'budget_reference':reference,'budget_rule':config['budget_rule'],
-                    'battery_multipliers':config['battery_allocation']['multipliers_by_K'][str(d['K'])],
-                    'depot_policy':config['depot_allocation'],
-                    'crop_xywh':crop,'cell_pixels':[60,60],'aggregation':'mean_pixel_rho',
-                    'mask_sha256':mask_hash,'grid_sha256':fingerprint,'config_version':config['version'],
-                    'zero_risk':total==0,'scale_assumption':'u=40m is a simulation scale, not georeferenced image scale'},
-                    'K':d['K'],'D':D,'eta':config['eta'],
-                    'uavs':fleet,'rho':config['rho']}
-                validate_instance(dict(data,grid=grid))
-                if row['id']==str(source.iloc[0].id):schema.validate(dict(data,grid=grid))
-                payload=encode_instance(data,encoded_grid)
-                relative=Path(row['split'])/d['profile']/f'{name}.json'
-                write_identical_or_new(base/relative,payload)
-                reachable=np.zeros((50,50),dtype=bool)
-                for craft in fleet:
-                    distance=40*np.hypot(ii-craft['depot'][0],jj-craft['depot'][1])
-                    reachable|=(distance/craft['v_h']<=D+1e-9)&(2*craft['e_h']*distance+craft['eps']<=config['eta']*craft['B']+1e-9)
-                records.append({'name':name,'path':relative.as_posix(),'image_id':row['id'],'split':row['split'],
-                    'profile':d['profile'],'K':d['K'],'budget_level':d['level'],'budget_fraction':d['fraction'],
-                    'B':B,'B_min':min(capacities),'B_max':max(capacities),'B_team':round(sum(capacities),6),
-                    'B_values':json.dumps(capacities,separators=(',',':')),
-                    'D':D,'seed':seed,'reference_depot_i':depot[0],'reference_depot_j':depot[1],
-                    'depot_values':json.dumps(depots,separators=(',',':')),
-                    'reference_energy':reference['energy'],'reference_time':reference['arrival_time'],
-                    'total_risk':total,'positive_cells':positive,'zero_risk':total==0,
-                    'reachable_positive_cells':int(np.count_nonzero(reachable&(w>0))),
-                    'grid_sha256':fingerprint,'bytes':len(payload)})
-        return records,total==0
 
-    count=byte_count=zero_maps=0;by_split={};start=time.perf_counter()
-    with (base/'manifest.csv').open('w',encoding='utf-8-sig',newline='') as handle:
-        writer=None
-        with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            for image_no,(rows,zero) in enumerate(pool.map(create,source.to_dict('records')),1):
-                if writer is None:writer=csv.DictWriter(handle,fieldnames=list(rows[0]));writer.writeheader()
-                writer.writerows(rows);count+=len(rows);zero_maps+=zero;byte_count+=sum(r['bytes'] for r in rows)
-                by_split[rows[0]['split']]=by_split.get(rows[0]['split'],0)+len(rows)
-                if image_no%250==0 or image_no==len(source):
-                    handle.flush();print(f'{image_no}/{len(source)} images; {count:,} instances',flush=True)
-    if count!=len(source)*expected_per_image:raise RuntimeError('Incomplete generation')
-    summary={'config_sha256':config_hash,'config_file':'configs/rescuenet_instances.json',
-        'source_manifest_file':'configs/rescuenet_split.csv',
-        'source_manifest_sha256':hashlib.sha256(SOURCE_MANIFEST.read_bytes()).hexdigest(),
-        'frozen_split_manifest_sha256':hashlib.sha256(SOURCE_MANIFEST.read_bytes()).hexdigest(),
-        'source_images':len(source),'instances':count,'instances_per_image':expected_per_image,'seeds':seeds,
-        'K_values':config['K_values'],'budget_levels':levels,'tree_weight':config['rho']['Tree'],
-        'by_split':by_split,'zero_risk_maps':int(zero_maps),'json_bytes':byte_count,'elapsed_seconds':time.perf_counter()-start,
-        'calibration':config['calibration'],'battery_allocation':config['battery_allocation'],
-        'depot_allocation':config['depot_allocation'],
-        'validation':{'generated_instances_checked':count,'native_cell_checks':len(source)*5,'schema_cases_checked':expected_per_image}}
-    (base/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-    level_table='\n'.join(f'| {d["K"]} | {d["level"]} | {100*d["fraction"]:g}% |' for d in designs)
-    readme=f'''# RescueNet 50×50 — bộ instance K=6
+def dataset_readme(size,summary):
+    return f'''# RescueNet {size}×{size}
 
-**{count:,} instance** từ 4.494 ảnh, dùng cho bài toán khảo sát rủi ro với sáu UAV.
-Mỗi ảnh có {expected_per_image} instance: 3 mức ngân sách × 3 seed (42, 43, 44).
-Mỗi instance có sáu depot khác nhau và pin riêng cho từng UAV.
-
-## Cấu trúc thư mục
+Bộ dữ liệu chỉ chứa **{summary['instances']:,} instance đã xác thực** từ {summary['source_images']:,} ảnh.
+K=6; sáu depot khác nhau; ba mức ngân sách và ba seed 42/43/44, tổng 9 instance/ảnh.
+Val: **{summary['by_split'].get('val',0):,}**; test: **{summary['by_split'].get('test',0):,}**.
+Mỗi instance có nghiệm khả thi đạt ≥10% và cận trên chứng minh mức phủ tối ưu ≤50%.
 
 ```text
-rescuenet_50x50/
-  val/                       # {by_split['val']:,} instance, 899 ảnh
-    K6_blow/
-    K6_bmedium/
-    K6_bhigh/
-  test/                      # {by_split['test']:,} instance, 3.595 ảnh; cùng ba thư mục
+rescuenet_{size}x{size}/
+  val/                       # K6_blow, K6_bmedium, K6_bhigh
+  test/                      # cùng ba thư mục cấu hình
   manifest.csv
+  certificates.jsonl
   summary.json
   README.md
 ```
 
-- **JSON:** input đầy đủ của một bài toán: lưới rủi ro, deadline, depot và pin của sáu UAV.
-- **manifest.csv:** danh sách instance, đường dẫn tương đối, split, seed và ngân sách.
-- **summary.json:** thông tin phiên bản, checksum và kết quả kiểm tra dữ liệu.
+- JSON chứa đầy đủ input theo `docs/instance_format.md`.
+- Manifest liệt kê các instance; certificates lưu nghiệm và cận kiểm chứng; summary lưu phiên bản và checksum.
+- Dùng val chọn tham số, cố định tham số trước khi đánh giá test.
+- Không có edge instance. Ảnh không được chọn chỉ được ghi chỉ mục nguồn riêng trong `data/rescuenet_unselected/`.
 
-Ví dụ `rescuenet_10778_50x50_K6_blow_s42.json`: ảnh 10778, lưới 50×50, sáu UAV, mức low, seed 42.
-low/medium/high là mức tài nguyên, không phải tỷ lệ rủi ro phủ.
-
-## Sử dụng
-
-1. Giải nén vào `data/instances/rescuenet_50x50/` trong repo, giữ cả manifest và summary.
-2. Dùng val chọn tham số thuật toán; cố định tham số trước khi chạy test.
-3. Đọc từng JSON và trả về sáu route theo thứ tự UAV trong `uavs`.
-
-Không cần ảnh/mask gốc để giải bài toán. Cùng ảnh/seed giữ nguyên depot giữa ba mức ngân sách.
-Đọc pin thực tại `uavs[k].B`; cột B trong manifest chỉ là pin cơ sở.
-Có {zero_maps} ảnh có tổng rủi ro bằng 0: tỷ lệ phủ là N/A, không tính vào thống kê tỷ lệ.
-
-Kiểm tra bộ dữ liệu từ thư mục gốc repo, sau khi cài `requirements-instances.txt`:
+Giải nén vào thư mục trống `data/instances/rescuenet_{size}x{size}/`, không chồng lên bản cũ.
+Chạy kiểm tra từ gốc repo:
 
 ```powershell
-python scripts/validate_instances.py --workers 6
+python scripts/validate_instances.py data/instances/rescuenet_{size}x{size} --workers 6
 ```
 
-Phương pháp sinh, trọng số và công thức ngân sách được trình bày trong
-`docs/rescuenet_experiment_protocol.md` của repo; chuẩn input/nghiệm nằm trong `docs/instance_format.md`.
+Phương pháp sinh và công thức: `docs/rescuenet_experiment_protocol.md` trong repo.
 '''
-    (base/'README.md').write_text(readme,encoding='utf-8')
-    print(json.dumps({k:v for k,v in summary.items() if k!='calibration'},ensure_ascii=False,indent=2),flush=True)
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--grid-size',type=int,choices=[50,100],default=50)
+    parser.add_argument('--output',type=Path,default=None)
+    parser.add_argument('--workers',type=int,default=6)
+    args=parser.parse_args()
+    if args.workers<1:parser.error('workers must be positive')
+    size=args.grid_size;config_path=config_path_for(size);config=load_config(config_path);source=read_source()
+    if (config['seeds']!=[42,43,44] or config['K_values']!=[6] or config['grid']!={'m':size,'n':size,'u':40}
+            or not config.get('selection',{}).get('only_certified')):
+        raise ValueError('Expected K6, three fixed seeds, selected grid and certified-only selection')
+    base=(args.output or ROOT/f'data/instances/rescuenet_{size}x{size}').resolve();base.mkdir(parents=True,exist_ok=True)
+    config_hash=hashlib.sha256(config_path.read_bytes()).hexdigest()
+    if (base/'summary.json').exists() and json.loads((base/'summary.json').read_text(encoding='utf-8'))['config_sha256']!=config_hash:
+        raise ValueError('Existing dataset uses another config; move it aside before generating')
+    for split in ['val','test']:
+        for level in config['budget_levels']:(base/split/f'K6_b{level["name"]}').mkdir(parents=True,exist_ok=True)
+    rejected_root=ROOT/'data/rescuenet_unselected';rejected_root.mkdir(parents=True,exist_ok=True)
+    rejected_path=rejected_root/f'{size}x{size}.csv'
+    fields=['grid_size','image_id','source_split','group_id','image_path','mask_path','status','reason_by_seed','impossibility_proofs','mask_sha256','grid_sha256']
+    count=byte_count=zero_maps=selected=excluded=0;by_split={};reasons={};start=time.perf_counter();schema_cases=0
+    schema=Draft202012Validator(json.loads((ROOT/'docs/instance.schema.json').read_text(encoding='utf-8')))
+    with (base/'manifest.csv').open('w',encoding='utf-8-sig',newline='') as manifest, (base/'certificates.jsonl').open('w',encoding='utf-8') as certificates, rejected_path.open('w',encoding='utf-8-sig',newline='') as rejects:
+        writer=None;reject_writer=csv.DictWriter(rejects,fieldnames=fields);reject_writer.writeheader()
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            tasks=((row,config,str(base)) for row in source.to_dict('records'))
+            for image_no,(rows,zero,proofs,rejected) in enumerate(pool.map(create_image,tasks,chunksize=1),1):
+                zero_maps+=zero
+                if rejected:
+                    reject_writer.writerow(rejected);excluded+=1
+                    reasons[rejected['status']]=reasons.get(rejected['status'],0)+1
+                else:
+                    if writer is None:
+                        writer=csv.DictWriter(manifest,fieldnames=list(rows[0]));writer.writeheader()
+                        for row in rows:schema.validate(json.loads((base/row['path']).read_bytes()));schema_cases+=1
+                    writer.writerows(rows)
+                    for proof in proofs:certificates.write(json.dumps(proof,separators=(',',':'),allow_nan=False)+'\n')
+                    selected+=1;count+=len(rows);byte_count+=sum(r['bytes'] for r in rows)
+                    split=rows[0]['split'];by_split[split]=by_split.get(split,0)+len(rows)
+                if image_no%250==0 or image_no==len(source):
+                    manifest.flush();rejects.flush();certificates.flush()
+                    print(f'{image_no}/{len(source)} images; {count:,} certified instances; {excluded} unselected sources',flush=True)
+    if not count or count!=selected*9 or selected+excluded!=len(source):raise RuntimeError('Incomplete selection')
+    summary={'config_sha256':config_hash,'config_file':config_path.relative_to(ROOT).as_posix(),
+        'source_manifest_file':'configs/rescuenet_split.csv','source_manifest_sha256':hashlib.sha256(SOURCE_MANIFEST.read_bytes()).hexdigest(),
+        'frozen_split_manifest_sha256':hashlib.sha256(SOURCE_MANIFEST.read_bytes()).hexdigest(),
+        'source_images_scanned':len(source),'source_images':selected,'unselected_source_images':excluded,
+        'unselected_catalog_file':rejected_path.relative_to(ROOT).as_posix(),'unselected_catalog_sha256':hashlib.sha256(rejected_path.read_bytes()).hexdigest(),
+        'unselected_by_status':reasons,'instances':count,'instances_per_image':9,'seeds':config['seeds'],'K_values':[6],
+        'grid':config['grid'],'budget_levels':config['budget_levels'],'by_split':by_split,'zero_risk_maps':0,
+        'zero_risk_sources_scanned':int(zero_maps),'json_bytes':byte_count,'elapsed_seconds':time.perf_counter()-start,
+        'battery_allocation':config['battery_allocation'],'depot_allocation':config['depot_allocation'],
+        'by_case_set':{'benchmark':count},'coverage_certification':config['coverage_certification'],
+        'certificates_sha256':hashlib.sha256((base/'certificates.jsonl').read_bytes()).hexdigest(),
+        'validation':{'generated_instances_checked':count,'native_cell_checks':len(source)*5,'schema_cases_checked':schema_cases}}
+    (base/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+    (base/'README.md').write_text(dataset_readme(size,summary),encoding='utf-8')
+    print(json.dumps({'grid_size':size,'instances':count,'selected_images':selected,'unselected_images':excluded,'by_split':by_split},indent=2),flush=True)
 
 
 if __name__=='__main__':main()

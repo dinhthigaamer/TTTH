@@ -1,5 +1,9 @@
 # Local datasets, generated instances, archives and reproducible reports
-data/
+/data/*
+
+# Keep source selection records; exclude images and generated instances
+!/data/rescuenet_unselected/
+!/data/rescuenet_unselected/**
 outputs/
 
 # Local references excluded from the instance handoff

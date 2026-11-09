@@ -1,6 +1,6 @@
 """Measure achieved risk coverage of every generated instance using frozen greedy.
 
-Outputs only one result CSV and one summary JSON/Markdown under outputs/rescuenet_coverage.
+Outputs a result CSV and summary JSON/Markdown in a separate directory per grid size.
 Inputs, budgets, weights, and source splits are never changed. No optimality claim.
 """
 import argparse
@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from generate_rescuenet_instances import greedy_routes
-from validate_instances import ROOT,DEFAULT_DATA,CONFIG,evaluate_routes
+from validate_instances import ROOT,DEFAULT_DATA,evaluate_routes,dataset_config_path,load_config
 
 
 def evaluate_image(task):
@@ -43,7 +43,7 @@ def evaluate_image(task):
             'B_team':round(sum(c['B'] for c in instance['uavs']),6),
             'D':row['D'],'total_risk':total,'covered_risk':score['objective'],
             'risk_coverage':coverage,'cover_rate':score['cover_rate'],
-            'observed_cells':int(round(score['cover_rate']*2500)),
+            'observed_cells':int(round(score['cover_rate']*instance['grid']['m']*instance['grid']['n'])),
             'max_arrival_seconds':max(s['arrival_time'] for s in score['uavs']),
             'max_energy_fraction':max(s['energy']/(instance['eta']*craft['B'])
                                        for s,craft in zip(score['uavs'],instance['uavs'])),
@@ -80,6 +80,7 @@ def main():
         sys.stdout.reconfigure(encoding='utf-8')
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data',type=Path,default=DEFAULT_DATA)
+    parser.add_argument('--output',type=Path,default=None)
     parser.add_argument('--workers',type=int,default=6)
     parser.add_argument('--summarize-only',action='store_true',help='Rebuild reports from a complete existing results.csv')
     args=parser.parse_args()
@@ -87,10 +88,14 @@ def main():
     base=args.data.resolve()
     manifest=pd.read_csv(base/'manifest.csv',dtype={'image_id':str})
     metadata=json.loads((base/'summary.json').read_text(encoding='utf-8'))
-    config_hash=hashlib.sha256(CONFIG.read_bytes()).hexdigest()
+    config_path=dataset_config_path(metadata);config=load_config(config_path)
+    config_hash=hashlib.sha256(config_path.read_bytes()).hexdigest()
     if config_hash!=metadata['config_sha256'] or len(manifest)!=metadata['instances']:
         raise ValueError('Dataset/config mismatch')
-    out=ROOT/'outputs/rescuenet_coverage'
+    if 'coverage_certification' in config:
+        manifest=manifest[manifest.case_set=='benchmark'].copy()
+    size=config['grid']['m']
+    out=args.output or ROOT/('outputs/rescuenet_coverage' if size==50 else f'outputs/rescuenet_coverage_{size}x{size}')
     out.mkdir(parents=True,exist_ok=True)
     previous_summary=None
     if args.summarize_only and (out/'summary.json').exists():
@@ -125,8 +130,8 @@ def main():
     all_rows=df.assign(split='all')
     summary={'algorithm':'greedy gain/(distance_in_cells+1), sequential UAVs with shared covered set',
         'meaning':'feasible achieved coverage, not an optimum or an upper bound',
-        'battery_allocation':json.loads(CONFIG.read_text(encoding='utf-8'))['battery_allocation'],
-        'depot_allocation':json.loads(CONFIG.read_text(encoding='utf-8'))['depot_allocation'],
+        'battery_allocation':config['battery_allocation'],
+        'depot_allocation':config['depot_allocation'],
         'config_sha256':config_hash,
         'greedy_code_sha256':previous_summary['greedy_code_sha256'] if previous_summary else
                             hashlib.sha256((ROOT/'scripts/generate_rescuenet_instances.py').read_bytes()).hexdigest(),

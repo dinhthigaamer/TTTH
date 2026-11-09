@@ -10,7 +10,8 @@
     "mask_path": "data/RescueNet/RescueNet/train/train-label-img/10778_lab.png",
     "seed": 42,
     "budget_level": "low",
-    "budget_fraction": 0.125,
+    "budget_fraction": 0.123328786028,
+    "budget_time_fraction": 0.123328786028,
     "budget_reference": {
       "energy": 102490.26479563164,
       "arrival_time": 11745.309329876338,
@@ -27,7 +28,7 @@
       "observations": 2500,
       "method": "minimum-energy serpentine orientation"
     },
-    "budget_rule": "eta*B_base=fraction*E_zigzag/K; D=fraction*T_zigzag/K; B_i=multiplier_i*B_base with exact team-sum preservation",
+    "budget_rule": "B_base=energy_fraction*E_zigzag/(K*eta); D=time_fraction*T_zigzag/K; select only inputs with verified optimum risk coverage in 10-50%",
     "battery_multipliers": [
       0.8,
       0.9,
@@ -46,7 +47,7 @@
       "replacement": false,
       "shared_across_budget_levels": true,
       "risk_independent": true,
-      "budget_reference": "UAV 0 depot; preserves previous B_base and D",
+      "budget_reference": "UAV 0 depot; full-sweep reference on 50x50",
       "sampler": "SHA256 per image/seed, NumPy default_rng, historical first cell plus choice without replacement"
     },
     "crop_xywh": [
@@ -62,20 +63,21 @@
     "aggregation": "mean_pixel_rho",
     "mask_sha256": "f4f09df27768a2e820bf7317c12b83a6ae0f558089e548cab123ec22c9b11e54",
     "grid_sha256": "d81b3dea4292ef0b366e05a9e11ecf7468a7852151bf9051a0862879d9002a49",
-    "config_version": "rescuenet_50x50_K6_distinct_depots_v4",
+    "config_version": "rescuenet_50x50_K6_selected_v1",
+    "case_set": "benchmark",
     "zero_risk": false,
     "scale_assumption": "u=40m is a simulation scale, not georeferenced image scale"
   },
   "K": 6,
-  "D": 244.693944,
+  "D": 241.422457,
   "eta": 1.0,
   "uavs": [
-    {"depot": [24, 29], "B": 1708.17108, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0},
-    {"depot": [27, 39], "B": 1921.692465, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0},
-    {"depot": [20, 11], "B": 2028.453158, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0},
-    {"depot": [33, 30], "B": 2241.974543, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0},
-    {"depot": [38, 24], "B": 2348.735235, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0},
-    {"depot": [19, 46], "B": 2562.256619, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0}
+    {"depot": [24, 29], "B": 1685.333325, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0},
+    {"depot": [27, 39], "B": 1895.99999, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0},
+    {"depot": [20, 11], "B": 2001.333323, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0},
+    {"depot": [33, 30], "B": 2211.999989, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0},
+    {"depot": [38, 24], "B": 2317.333322, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0},
+    {"depot": [19, 46], "B": 2527.999987, "v_h": 15, "e_h": 1, "tau": 2, "eps": 0}
   ],
   "rho": {
     "Background": 0.0,

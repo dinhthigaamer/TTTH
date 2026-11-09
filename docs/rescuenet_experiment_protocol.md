@@ -1,38 +1,49 @@
-﻿# Phương pháp sinh instance RescueNet
+# Phương pháp sinh instance RescueNet
 
-Tài liệu mô tả cách xây dựng bộ instance `rescuenet_50x50_K6_distinct_depots_v4`
-cho bài toán Deadline-constrained Multi-UAV Risk Coverage.
-Chi phí và ràng buộc tuân theo [mô hình bài toán](mo_hinh_deadline_constrained_multi_uav_risk_coverage.md);
-JSON tuân theo [chuẩn input và nghiệm](instance_format.md).
+Tài liệu mô tả quy trình chọn ảnh và sinh hai bộ 50×50, 100×100 cho bài toán
+Deadline-constrained Multi-UAV Risk Coverage. Chỉ những ảnh có đủ chín instance
+được chứng nhận mức phủ tối ưu trong 10–50% mới được đưa vào bộ dữ liệu chính.
+Input và nghiệm tuân theo [chuẩn chung](instance_format.md);
+chi phí và ràng buộc tuân theo [mô hình bài toán](mo_hinh_deadline_constrained_multi_uav_risk_coverage.md).
 
-## 1. Cấu hình thực nghiệm
+## 1. Cấu hình cố định
 
 | Thành phần | Giá trị |
 |---|---|
-| Ảnh nguồn | 4.494; phân hoạch cố định: 899 val, 3.595 test |
-| Lưới | 50×50 ô; cạnh ô mô phỏng u=40 m |
-| UAV | K=6, sáu depot riêng |
+| Nguồn | 4.494 ảnh/mask RescueNet |
+| Phân hoạch nguồn | 899 val, 3.595 test, giữ theo manifest đã đóng băng |
+| Lưới | 50×50 hoặc 100×100; cạnh ô mô phỏng u=40 m |
+| UAV | K=6, sáu depot khác nhau |
 | Seed | 42, 43, 44 |
-| Mức ngân sách | low, medium, high |
-| Số lượng | 9 instance/ảnh; tổng 40.446 = 8.091 val + 32.355 test |
+| Biến thể mỗi ảnh được chọn | 3 mức ngân sách × 3 seed = 9 instance |
 | Thông số chung | v_h=15 m/s, e_h=1, tau=2 s, eps=0, eta=1 |
+| Hệ số pin | [0.8,0.9,0.95,1.05,1.1,1.2] |
 
-[Cấu hình JSON](../configs/rescuenet_instances.json) là nguồn tham số chính.
-[Manifest nguồn](../configs/rescuenet_split.csv) cố định ID ảnh, split, nhóm cảnh và checksum.
-Các biến thể của cùng ảnh nằm cùng split. Val dùng chọn tham số; test dùng đánh giá sau khi cố định tham số.
+Tham số nằm trong [config 50×50](../configs/rescuenet_instances.json) và
+[config 100×100](../configs/rescuenet_instances_100x100.json).
+[Manifest nguồn](../configs/rescuenet_split.csv) lưu ID, nhóm cảnh, split, đường dẫn và checksum.
+Ảnh được chọn giữ nguyên split nguồn; các biến thể của cùng ảnh luôn nằm cùng tập.
+Val dùng chọn tham số thuật toán, test dùng đánh giá sau khi cố định tham số.
 
-## 2. Xây dựng bản đồ rủi ro
+## 2. Bản đồ rủi ro
 
-Mask ID gốc được crop giữa thành 3.000×3.000 pixel rồi chia thành 50×50 ô, mỗi ô 60×60 pixel.
-Phần rìa ngoài crop không tham gia instance; mask không bị kéo giãn.
-Với tập pixel $A_{ij}$ thuộc ô hàng i, cột j:
+Mask ID gốc được crop giữa thành 3.000×3.000 pixel, không resize hoặc nội suy nhãn.
+Phần rìa ngoài crop không tham gia instance.
+
+| Lưới | Pixel mỗi ô | Số ô | Quy mô mô phỏng theo u=40 m |
+|---|---|---:|---|
+| 50×50 | 60×60 | 2.500 | 2×2 km |
+| 100×100 | 30×30 | 10.000 | 4×4 km |
+
+Với tập pixel A của một ô, trọng số ô là:
 
 $$
-w_{ij}=\frac{1}{3600}\sum_{x\in A_{ij}}\rho(\operatorname{label}(x)).
+w_c=\frac{1}{|A_c|}\sum_{x\in A_c}\rho(\operatorname{label}(x)).
 $$
 
-w được làm tròn đến 12 chữ số thập phân. Chỉ số ô bắt đầu từ 0.
-u=40 m là thang mô phỏng được lựa chọn, không suy ra từ độ phân giải địa lý của ảnh.
+w được làm tròn đến 12 chữ số. Chỉ số hàng/cột bắt đầu từ 0.
+u=40 m là giả định mô phỏng, không suy ra từ độ phân giải địa lý của ảnh.
+Hai bộ dùng cùng crop, nhưng không mô phỏng cùng một diện tích vật lý cố định.
 
 | Lớp | rho |
 |---|---:|
@@ -48,148 +59,140 @@ u=40 m là thang mô phỏng được lựa chọn, không suy ra từ độ ph�
 | Tree | 0.20 |
 | Pool | 0.00 |
 
-rho biểu diễn ưu tiên khảo sát. Nhãn Tree không phân biệt mức hư hại; Water không phân biệt nước tự nhiên và ngập.
-343 bản đồ có tổng w=0 được giữ làm trường hợp biên; tỷ lệ phủ của chúng là N/A.
+rho biểu diễn ưu tiên khảo sát, không phải xác suất thiệt hại.
+Tree không phân biệt mức hư hại; Water không phân biệt ngập và nước tự nhiên.
 
-## 3. Bố trí depot
+## 3. Depot và ngân sách
 
-Mỗi cặp `(image_id, seed)` xác định sáu ô depot có thứ tự, không trùng nhau.
-SHA-256 của ID ảnh và seed được dùng khởi tạo bộ sinh số NumPy: sinh ô đầu tiên,
-sau đó lấy năm ô không hoàn lại từ 2.499 ô còn lại.
+Mỗi cặp `(image_id, seed)` khởi tạo NumPy RNG từ SHA-256 để lấy sáu ô depot
+không hoàn lại. Depot không phụ thuộc rủi ro và giữ nguyên giữa ba mức ngân sách.
+Mỗi UAV xuất phát và quay về depot riêng; không áp đặt khoảng cách tối thiểu giữa depot.
 
-Cách chọn độc lập với rủi ro, không áp đặt khoảng cách tối thiểu giữa các depot.
-Cùng ảnh/seed giữ nguyên sáu depot và thứ tự UAV ở cả ba mức ngân sách.
-Mỗi UAV xuất phát và quay về depot riêng; vị trí cất/hạ cánh thực tế không thuộc mô hình.
+Một UAV tham chiếu quét zig-zag đủ L=mn ô từ depot `uavs[0]`.
+Trong tám hướng quét hàng/cột và lật hướng, chọn năng lượng nhỏ nhất, rồi thời gian nhỏ hơn khi bằng năng lượng.
+Với S_full là quãng đường đến ô cuối, r_full là chặng quay về:
 
-## 4. Chi phí và điều kiện khả thi
+$$
+E_{\mathrm{full}}=e_h(S_{\mathrm{full}}+r_{\mathrm{full}})+L\varepsilon,
+\qquad T_{\mathrm{full}}=S_{\mathrm{full}}/v_h+(L-1)\tau.
+$$
 
-Với UAV k có depot $s_k$, route $R_k=(c_1,\ldots,c_L)$, L>0, đặt $c_0=s_k$:
+Pin cơ sở và deadline được chọn bằng:
+
+$$
+B_{\mathrm{base}}=\operatorname{round}_6\!\left(\frac{\alpha_E E_{\mathrm{full}}}{K\eta}\right),
+\qquad D=\operatorname{round}_6\!\left(\frac{\alpha_T T_{\mathrm{full}}}{K}\right).
+$$
+
+Bước đầu dùng alpha_E=alpha_T; khi cần, chọn hai hệ số độc lập.
+Đây là quy tắc thiết kế ngân sách, không phải công thức sinh B/D bắt buộc của mô hình.
+Các hệ số tài nguyên không đồng nghĩa với tỷ lệ rủi ro phủ.
+
+Với a_k là hệ số pin đã chốt:
+
+$$
+\widetilde B_k=\operatorname{round}_{6,\mathrm{HALF\_UP}}(a_kB_{\mathrm{base}}),
+\quad B_k=\widetilde B_k\ (k=1,\ldots,5),
+\quad B_6=6B_{\mathrm{base}}-\sum_{k=1}^{5}\widetilde B_k.
+$$
+
+Tổng pin đội bằng đúng 6*B_base ở độ chính xác một phần triệu.
+Chỉ số k=1…6 tương ứng `uavs[0]`…`uavs[5]`. B dùng đơn vị năng lượng quy ước.
+
+## 4. Điều kiện khả thi và chứng nhận mức phủ
+
+Với route R_k gồm p>0 ô, đặt c_0=s_k, S_k là quãng đường đến ô cuối và r_k là chặng về:
 
 $$
 d(a,b)=u\sqrt{(a_i-b_i)^2+(a_j-b_j)^2},
+\quad S_k=\sum_{q=1}^{p}d(c_{q-1},c_q),\quad r_k=d(c_p,s_k).
 $$
 
 $$
-S_k=\sum_{q=1}^{L}d(c_{q-1},c_q),\qquad r_k=d(c_L,s_k).
+T_{\mathrm{last}}(R_k)=S_k/v_h+(p-1)\tau\le D,
+\qquad E(R_k)=e_h(S_k+r_k)+p\varepsilon\le\eta B_k.
 $$
 
-$S_k$ là quãng đường đến ô cuối; $r_k$ là chặng quay về depot riêng. Hai ràng buộc:
+Deadline không tính chụp ở ô cuối hoặc thời gian quay về; pin có tính chặng quay về.
+Route không lặp ô; ô chung giữa nhiều UAV chỉ cộng thưởng một lần.
+
+Với W là tổng rủi ro và F* là giá trị tối ưu, mỗi instance được giữ phải có chứng nhận:
 
 $$
-T_{\mathrm{last}}(R_k)=\frac{S_k}{v_h}+(L-1)\tau\le D,
+0.1W\le F_{\mathrm{LB}}\le F^*\le F_{\mathrm{UB}}\le0.5W,\qquad W>0.
 $$
 
-$$
-E(R_k)=e_h(S_k+r_k)+L\varepsilon\le\eta B_k.
-$$
+Cận dưới là tổng rủi ro của một nghiệm khả thi, tạo bằng tiền tố zig-zag hoặc greedy
+trên cửa sổ 9×9 cùng 32 ô rủi ro cao nhất; khi cần tìm trên toàn bộ ô còn lại.
+Bộ kiểm tra tính lại chi phí và mục tiêu từ route, không tin giá trị lưu sẵn.
 
-D là deadline chung (giây); B_k là dung lượng pin riêng; eta là hệ số an toàn.
-Trong JSON, tau và eps tương ứng $\tau$ và $\varepsilon$.
-B dùng đơn vị năng lượng quy ước. Deadline đến lúc tới ô cuối; pin bao gồm chặng quay về.
-Route rỗng được phép. Ô depot chỉ nhận thưởng khi được ghi là ô quan sát trong route.
-
-## 5. Thiết kế ngân sách
-
-### 5.1. Đường quét tham chiếu
-
-Một UAV giả định quét zig-zag đủ 2.500 ô từ depot `uavs[0]`.
-Trong tám hướng quét hàng/cột và lật hướng, chọn hướng có năng lượng nhỏ nhất;
-nếu bằng năng lượng thì chọn thời gian đến ô cuối nhỏ hơn.
-Với quãng đường đến ô cuối $S_{\mathrm{full}}$ và chặng về $r_{\mathrm{full}}$:
+Cận trên dùng các ô có rủi ro dương có thể ghé riêng lẻ rồi quay về:
 
 $$
-E_{\mathrm{full}}=e_h(S_{\mathrm{full}}+r_{\mathrm{full}})+2500\varepsilon,
+C_k=\{c:w_c>0,\ d(s_k,c)/v_h\le D,\ 2e_hd(s_k,c)+\varepsilon\le\eta B_k\}.
 $$
 
-$$
-T_{\mathrm{full}}=\frac{S_{\mathrm{full}}}{v_h}+2499\tau.
-$$
-
-### 5.2. Deadline và pin từng UAV
-
-| Mức | alpha |
-|---|---:|
-| low | 0.125 |
-| medium | 0.20 |
-| high | 0.24 |
-
-Với K=6, pin cơ sở và deadline được xác định bằng:
+Đặt d_k là khoảng cách gần nhất từ depot k đến một ô rủi ro dương,
+delta là khoảng cách nhỏ nhất giữa hai ô rủi ro dương khác nhau (lấy u nếu chỉ có một ô).
+Số ô rủi ro dương được UAV k ghé không vượt:
 
 $$
-B_{\mathrm{base}}=\operatorname{round}_6\!\left(\frac{\alpha E_{\mathrm{full}}}{K\eta}\right),
-\qquad D=\operatorname{round}_6\!\left(\frac{\alpha T_{\mathrm{full}}}{K}\right).
+q_k=\max\!\left(0,\min\left(mn,
+\left\lfloor\frac{D-d_k/v_h}{\delta/v_h+\tau}\right\rfloor+1,
+\left\lfloor\frac{\eta B_k-2e_hd_k+e_h\delta}{e_h\delta+\varepsilon}\right\rfloor\right)\right).
 $$
 
-$\operatorname{round}_6$ là `round(..., 6)` của Python. Phân bổ pin theo thứ tự UAV:
+Gọi H_q(S) là tổng q trọng số lớn nhất trong S, hoặc toàn bộ S nếu có ít hơn q ô:
 
 $$
-(a_1,\ldots,a_6)=(0.8,0.9,0.95,1.05,1.1,1.2),
-\qquad \widetilde B_k=\operatorname{round}_{6,\mathrm{HALF\_UP}}(a_kB_{\mathrm{base}}).
+F_{\mathrm{UB}}=\min\left(W,
+H_{\sum_kq_k}\!\left(\bigcup_kC_k\right),\ \sum_kH_{q_k}(C_k)\right).
 $$
 
-Năm UAV đầu dùng $B_k=\widetilde B_k$; UAV cuối nhận phần dư làm tròn:
+Mỗi ô được quan sát phải khả đạt và mỗi UAV ghé không quá q_k ô rủi ro.
+Bỏ điều kiện nối đường bay và cho phép đếm trùng chỉ làm tăng miền nghiệm;
+vì vậy cận trên không thấp hơn tối ưu thực sự.
+Phương pháp cũ `reachable_top_weights_v1` dùng cận yếu hơn d_k=0, delta=u và vẫn hợp lệ.
+Trọng số được đổi sang số nguyên theo đơn vị 10^-12; kiểm tra khoảng 10–50% không dựa trên trung bình tập.
+Các kiểm tra hình học và số ô được làm tròn ra ngoài để giữ tính bảo thủ.
 
-$$
-B_6=6B_{\mathrm{base}}-\sum_{k=1}^{5}\widetilde B_k,
-\qquad \sum_{k=1}^{6}B_k=6B_{\mathrm{base}}.
-$$
+## 5. Chọn ảnh và sinh instance
 
-Chỉ số k=1…6 tương ứng `uavs[0]`…`uavs[5]`.
-B cơ sở là pin trung bình; mỗi UAV được kiểm tra bằng B_k và depot riêng.
-Cả pin và deadline cùng thay đổi giữa ba mức.
+1. Kiểm tra mask nguồn, tạo w và sinh depot theo seed cố định.
+2. Tìm ngân sách trong phạm vi hệ số [0.00001,0.5], dùng 28 bước chia đôi và cận trên ≤50%.
+3. Thử ba mức tương đối [0.6,0.8,1]; khi cần dùng các bộ mức gần nhau hơn ghi trong config.
+4. Nếu cần, cố định alpha_E trong [0.005,0.01,0.02,0.04,0.08,0.16,0.32,0.5] rồi tìm alpha_T độc lập.
+5. Chỉ ghi JSON khi đủ ba cặp B/D khác nhau sau làm tròn cho cả ba seed, và cả chín chứng nhận đều đạt.
 
-Đây là quy tắc thiết kế ngân sách của bộ dữ liệu, dựa trên gợi ý zig-zag trong chuẩn instance.
-Mô hình quy định công thức chi phí và điều kiện khả thi, không bắt buộc cách chọn B/D trên.
-alpha biểu diễn tài nguyên tham chiếu, không phải tỷ lệ rủi ro phủ.
+Quy tắc áp dụng giống nhau cho val/test; không dùng kết quả thuật toán được so sánh để chọn ngân sách.
+Do rủi ro theo ô là rời rạc, mức phủ không bắt buộc tăng đều giữa ba mức tài nguyên.
+Khoảng 10–50% được chứng nhận cho giá trị tối ưu; một thuật toán kém vẫn có thể đạt dưới 10%.
 
-### 5.3. Ví dụ
+Ảnh chưa được chọn chỉ được ghi vào `data/rescuenet_unselected/50x50.csv` hoặc `100x100.csv`:
 
-[Instance ảnh 10778, low, seed 42](examples/rescuenet_10778_50x50_K6_blow_s42.json)
-có E_full=102490.26479563164 và T_full=11745.309329876338 giây.
-Với alpha=0.125, B_base=2135.213850 và D=244.693944 giây.
-Sáu pin là [1708.171080, 1921.692465, 2028.453158, 2241.974543, 2348.735235, 2562.256619],
-tổng bằng 12811.283100.
+- `proven_incompatible`: có chứng minh không đáp ứng với cấu hình và seed bắt buộc.
+- `not_certified`: tìm kiếm chưa có đủ chứng nhận; không kết luận ảnh bất khả thi.
 
-## 6. Kiểm chứng và đánh giá
+Các CSV chỉ lưu ID, đường dẫn ảnh/mask gốc và lý do. Không tạo JSON, route hoặc ngân sách dự phòng
+cho ảnh bị loại. Dữ liệu gốc không bị di chuyển. Không có edge instance trong hai bộ đầu ra.
 
-Generator kiểm tra mask nguồn, phép tổng hợp w và tính hợp lệ của mọi instance.
-Validator đối chiếu JSON với cấu hình, seed, depot, pin, deadline và checksum lưới.
-Khi chấm nghiệm, không lặp ô trong một route; ô được nhiều UAV ghé chỉ cộng thưởng một lần.
+## 6. Tái lập và kiểm tra
 
-Greedy tham chiếu xử lý UAV theo thứ tự JSON, chọn ô chưa quan sát có tỷ số
-$w_c/(d/u+1)$ lớn nhất trong các ô còn thỏa deadline và pin, tính cả chặng về depot riêng.
-Mọi route được kiểm tra lại độc lập.
-Tỷ lệ rủi ro phủ bằng tổng w đã quan sát chia tổng w toàn bản đồ.
-Thống kê lấy trung bình ba seed trong từng ảnh rồi tổng hợp theo ảnh, riêng từng mức; loại tỷ lệ N/A.
-
-Ba alpha bắt nguồn từ pilot 32 nhóm ảnh val với depot chung và pin đồng nhất,
-hướng đến mức phủ 15/30/45%. Ngân sách được giữ nguyên khi chuyển sang depot riêng và pin khác nhau.
-Kết quả greedy đã đo trên test của phiên bản hiện tại:
-
-| Mức | Phủ trung bình (%) | Trung vị theo ảnh (%) |
-|---|---:|---:|
-| low | 33.55 | 27.36 |
-| medium | 53.20 | 49.06 |
-| high | 60.40 | 59.02 |
-
-Đây là mức đạt được của heuristic, không phải nghiệm tối ưu hay chặn trên.
-Bộ hiện tại không bảo đảm mỗi instance phủ 10–50%; medium/high vượt 50% về trung bình test.
-Các thay đổi ngân sách tiếp theo phải được chọn trên val trước khi đánh giá test.
-
-## 7. Tái lập
-
-Từ thư mục gốc repo, với mask gốc đúng đường dẫn trong manifest nguồn:
+Từ gốc repo, sau khi đặt mask gốc theo đường dẫn trong manifest nguồn:
 
 ```powershell
 python -m pip install -r requirements-instances.txt
 python -m unittest discover -s tests -v
-python scripts/generate_rescuenet_instances.py --workers 6
-python scripts/validate_instances.py --workers 6
-python scripts/evaluate_instances.py --workers 6
+python scripts/generate_rescuenet_instances.py --grid-size 50 --workers 6
+python scripts/generate_rescuenet_instances.py --grid-size 100 --workers 6
+python scripts/validate_instances.py data/instances/rescuenet_50x50 --workers 6
+python scripts/validate_instances.py data/instances/rescuenet_100x100 --workers 6
 ```
 
-Đầu ra nằm trong `data/instances/rescuenet_50x50/`, gồm val, test, manifest, summary và README.
-Kết quả đánh giá nằm trong `outputs/rescuenet_coverage/`.
-`manifest.csv` ghi B_base tại cột B, pin riêng tại B_values và sáu depot tại depot_values.
-`summary.json` lưu checksum và kết quả kiểm chứng.
-Generator từ chối trộn các cấu hình khác nhau trong cùng bộ dữ liệu.
+Mỗi thư mục instance chỉ có val, test, manifest.csv, certificates.jsonl, summary.json và README.md.
+Certificates lưu nghiệm theo chuẩn solution, cận kiểm chứng và SHA-256 của input.
+Validator đọc lại tất cả JSON, tính lại cận và nghiệm, kiểm tra số lượng, split và ba cặp ngân sách khác nhau.
+Số lượng ảnh được chọn và instance được ghi trong summary; ảnh còn lại không thuộc tập thực nghiệm.
+
+Đánh giá greedy tham chiếu bằng `scripts/evaluate_instances.py --data <thu_muc_instance>`.
+Thống kê lấy trung bình ba seed trong từng ảnh rồi tổng hợp theo ảnh, riêng từng mức ngân sách.
