@@ -1,0 +1,147 @@
+{
+  "version": "rescuenet_100x100_K6_selected_v1",
+  "grid": {
+    "m": 100,
+    "n": 100,
+    "u": 40
+  },
+  "crop_size_pixels": 3000,
+  "class_names": [
+    "Background",
+    "Water",
+    "Building No Damage",
+    "Building Minor Damage",
+    "Building Major Damage",
+    "Building Total Destruction",
+    "Vehicle",
+    "Road-Clear",
+    "Road-Blocked",
+    "Tree",
+    "Pool"
+  ],
+  "rho": {
+    "Background": 0.0,
+    "Water": 0.1,
+    "Building No Damage": 0.0,
+    "Building Minor Damage": 0.25,
+    "Building Major Damage": 0.75,
+    "Building Total Destruction": 1.0,
+    "Vehicle": 0.0,
+    "Road-Clear": 0.0,
+    "Road-Blocked": 0.2,
+    "Tree": 0.2,
+    "Pool": 0.0
+  },
+  "eta": 1.0,
+  "uav": {
+    "v_h": 15,
+    "e_h": 1,
+    "tau": 2,
+    "eps": 0
+  },
+  "seeds": [
+    42,
+    43,
+    44
+  ],
+  "K_values": [
+    6
+  ],
+  "budget_levels": [
+    {
+      "name": "low"
+    },
+    {
+      "name": "medium"
+    },
+    {
+      "name": "high"
+    }
+  ],
+  "budget_rule": "B_base=energy_fraction*E_zigzag/(K*eta); D=time_fraction*T_zigzag/K; select only inputs with verified optimum risk coverage in 10-50%",
+  "battery_allocation": {
+    "mode": "fixed_multipliers_preserve_team_capacity",
+    "multipliers_by_K": {
+      "6": [
+        0.8,
+        0.9,
+        0.95,
+        1.05,
+        1.1,
+        1.2
+      ]
+    },
+    "rounding_decimals": 6,
+    "residual_uav": "last"
+  },
+  "depot_allocation": {
+    "mode": "uniform_distinct_cells",
+    "seeds": [
+      42,
+      43,
+      44
+    ],
+    "replacement": false,
+    "shared_across_budget_levels": true,
+    "risk_independent": true,
+    "budget_reference": "UAV 0 depot; full-sweep reference on 100x100",
+    "sampler": "SHA256 per image/seed, NumPy default_rng, first cell plus choice without replacement on 100x100"
+  },
+  "coverage_certification": {
+    "alpha_min": 1e-05,
+    "alpha_max": 0.5,
+    "upper_search_percent": 50,
+    "upper_search_steps": 28,
+    "level_factor_candidates": [
+      [
+        0.6,
+        0.8,
+        1.0
+      ],
+      [
+        0.85,
+        0.925,
+        1.0
+      ],
+      [
+        0.95,
+        0.975,
+        1.0
+      ],
+      [
+        0.9999,
+        0.99995,
+        1.0
+      ],
+      [
+        0.999999,
+        0.9999995,
+        1.0
+      ]
+    ],
+    "acceptance": "exact risk ticks: feasible witness >=10%; conservative optimum upper bound <=50%",
+    "group_policy": "select image only if all 9 variants certify 10-50%; otherwise record source only, generate no instance",
+    "construction": "deterministic per-instance budget construction, identical rule for val and test; not optimizer tuning",
+    "upper_bound": "entry_distance_top_weights_v2",
+    "weight_tick_scale": 1000000000000,
+    "allowed_upper_bounds": [
+      "reachable_top_weights_v1",
+      "entry_distance_top_weights_v2"
+    ],
+    "independent_energy_candidates": [
+      0.005,
+      0.01,
+      0.02,
+      0.04,
+      0.08,
+      0.16,
+      0.32,
+      0.5
+    ]
+  },
+  "selection": {
+    "only_certified": true,
+    "unselected_sources": "data/rescuenet_unselected/100x100.csv",
+    "generate_unselected_instances": false
+  }
+}

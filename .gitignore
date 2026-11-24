@@ -1,3 +1,25 @@
+# Local datasets, generated instances, archives and reproducible reports
+/data/*
+
+# Keep source selection records; exclude images and generated instances
+!/data/rescuenet_unselected/
+!/data/rescuenet_unselected/**
+outputs/
+
+# Local references excluded from the instance handoff
+/scripts/split_rescuenet.py
+/notebooks/
+
+# Python environments and generated caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Interrupted atomic writes
+*.part
 # Python bytecode and caches
 __pycache__/
 *.py[cod]
