@@ -24,7 +24,8 @@ if __name__ == "__main__":
         seed = int(arg)
         inst = make_random_instance(m=50, n=50, K=3, seed=seed)
 
-    print(f"Instance: {inst.name} | Lưới {inst.m}x{inst.n}, K={inst.K}, D={inst.D:.0f}s, tổng rủi ro={inst.w.sum():.1f}")
+    print(
+        f"Instance: {inst.name} | Lưới {inst.m}x{inst.n}, K={inst.K}, D={inst.D:.0f}s, tổng rủi ro={inst.w.sum():.1f}")
     print(f"{'Thuật toán':<12}{'khả thi':<9}{'rủi ro phủ':<12}{'ΣR':<10}{'cover σ':<10}{'số ô':<7}{'thời gian chạy':<14}")
     print("-" * 74)
     for algo in (zigzag, na_greedy, heu_greedy, svrec, aco, ga):
