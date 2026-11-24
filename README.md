@@ -1,3 +1,7 @@
+# Result Summarize:
+
+solution_summary.csv
+
 # Sinh test (Minh, Hoàng)
 
 - format của test được ghi ở docs/instance_format.md
