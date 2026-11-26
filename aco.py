@@ -27,9 +27,10 @@ Mở rộng MO-ACO (hàm `mo_aco`, `make_moaco_step`; `aco` gốc không đổi)
 """
 from __future__ import annotations
 
-import numpy as np
-
+import time
 from typing import List, Optional, Sequence, Tuple
+
+import numpy as np
 
 from common import (Action, Cell, Instance, ParetoArchive, Solution, UAVState, cell_times, clock, evaluate,
                     hypervolume_2d, nearest_uncovered_H, neighbors8, run_shared_closed)
@@ -93,20 +94,37 @@ def aco(
     rho: float = 0.1,
     eps_decay: float = 0.5,
     seed: int = 42,
+    time_limit: Optional[float] = None,
+    max_evals: Optional[int] = None,
+    trace: Optional[list] = None,
 ) -> Solution:
+    t0 = time.perf_counter()
+    evals = 0
     rng = np.random.default_rng(seed)
     tau0 = 1.0
     tau = np.full((inst.m, inst.n), tau0, dtype=float)
     best_routes = [[] for _ in range(inst.K)]
     best_f = -1.0
 
+    stop = False
     for _ in range(G):
         for _ in range(A):
+            if evals >= 1 and (
+                (time_limit is not None and time.perf_counter() - t0 >= time_limit)
+                or (max_evals is not None and evals >= max_evals)
+            ):
+                stop = True
+                break
             sol = run_shared_closed(inst, make_aco_step(
                 tau, tau0, alpha, beta, q0, rho, rng), "ACO")
+            evals += 1
             f_val = float(evaluate(inst, sol.routes)["f"])
             if f_val > best_f:
                 best_f, best_routes = f_val, sol.routes
+                if trace is not None:
+                    trace.append((time.perf_counter() - t0, [list(r) for r in best_routes]))
+        if stop:
+            break
 
         # Eq. (22)-(23): Cập nhật Pheromone toàn cục theo nghiệm tốt nhất P~
         tau *= (1.0 - eps_decay)
@@ -173,9 +191,13 @@ def make_moaco_step(H: np.ndarray, tau_cov: np.ndarray, tau_ben: np.ndarray, tau
 
 def mo_aco(inst: Instance, H: np.ndarray, G: int = 10, A: int = 20, q0: float = 0.7, alpha: float = 1.0,
            beta: float = 2.0, rho: float = 0.1, eps_decay: float = 0.5, nb: int = 10, seed: int = 42,
-           seeds: Optional[Sequence[List[List[Cell]]]] = None, archive_cap: int = 40
+           seeds: Optional[Sequence[List[List[Cell]]]] = None, archive_cap: int = 40,
+           time_limit: Optional[float] = None, max_evals: Optional[int] = None,
+           trace: Optional[list] = None
            ) -> Tuple[ParetoArchive, List[float]]:
     """Trả về (archive Pareto, lịch sử Hypervolume theo thế hệ). `seeds`: lộ trình greedy nạp sẵn vào archive."""
+    t0 = time.perf_counter()
+    evals = 0
     rng = np.random.default_rng(seed)
     tau0 = 1.0
     tau_cov = np.full((inst.m, inst.n), tau0, dtype=float)
@@ -183,14 +205,28 @@ def mo_aco(inst: Instance, H: np.ndarray, G: int = 10, A: int = 20, q0: float = 
     arch, hist = ParetoArchive(archive_cap), []
     for r in (seeds or []):
         arch.add(evaluate(inst, r, H)["objs"], r)
+    if trace is not None:
+        trace.append((0.0, arch.points().copy()))
 
+    stop = False
     for _ in range(G):
         for ai in range(A):
+            if evals >= 1 and (
+                (time_limit is not None and time.perf_counter() - t0 >= time_limit)
+                or (max_evals is not None and evals >= max_evals)
+            ):
+                stop = True
+                break
             lam = ai / (A - 1) if A > 1 else 0.5
             step = make_moaco_step(H, tau_cov, tau_ben,
                                    tau0, alpha, beta, q0, rho, lam, rng, nb)
             sol = run_shared_closed(inst, step, "MO-ACO")
-            arch.add(evaluate(inst, sol.routes, H)["objs"], sol.routes)
+            evals += 1
+            if arch.add(evaluate(inst, sol.routes, H)["objs"], sol.routes) and trace is not None:
+                trace.append((time.perf_counter() - t0, arch.points().copy()))
+        if stop:
+            hist.append(hypervolume_2d(arch.points()))
+            break
 
         # cập nhật toàn cục: bay hơi rồi bồi đắp cả hai ma trận từ archive (chia đều theo số nghiệm)
         tau_cov *= (1.0 - eps_decay)
