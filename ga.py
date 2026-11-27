@@ -14,6 +14,7 @@ Tận dụng trực tiếp `UAVState`, `neighbors8`, `evaluate` và `run_shared_
 """
 from __future__ import annotations
 
+import time
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -51,6 +52,18 @@ def _decode(inst: Instance, prio: np.ndarray, r_th: float, H: Optional[np.ndarra
     return run_shared_closed(inst, step, "GA").routes
 
 
+def _over_budget(
+    t0: float,
+    evals: int,
+    time_limit: Optional[float],
+    max_evals: Optional[int],
+) -> bool:
+    return evals >= 1 and (
+        (time_limit is not None and time.perf_counter() - t0 >= time_limit)
+        or (max_evals is not None and evals >= max_evals)
+    )
+
+
 def ga(
     inst: Instance,
     pop_size: int = 12,
@@ -58,7 +71,12 @@ def ga(
     crossover_prob: float = 0.85,
     mutation_prob: float = 0.40,
     seed: int = 42,
+    time_limit: Optional[float] = None,
+    max_evals: Optional[int] = None,
+    trace: Optional[list] = None,
 ) -> Solution:
+    t0 = time.perf_counter()
+    evals = 0
     rng = np.random.default_rng(seed)
     r_th = float(inst.w.mean())
 
@@ -71,6 +89,8 @@ def ga(
     best_routes = max([svrec(inst).routes, na_greedy(
         inst).routes], key=lambda r: evaluate(inst, r)["f"])
     best_f = float(evaluate(inst, best_routes)["f"])
+    if trace is not None:
+        trace.append((time.perf_counter() - t0, [list(r) for r in best_routes]))
 
     # Bơm kinh nghiệm từ nghiệm khởi tạo vào cá thể đầu tiên
     for r in best_routes:
@@ -78,43 +98,59 @@ def ga(
             pop[0][c] *= 1.35
 
     fit = []
+    stop = False
     for ind in pop:
+        if _over_budget(t0, evals, time_limit, max_evals):
+            stop = True
+            break
         rds = _decode(inst, ind, r_th)
+        evals += 1
         f_val = float(evaluate(inst, rds)["f"])
         fit.append(f_val)
         if f_val > best_f:
             best_f, best_routes = f_val, rds
+            if trace is not None:
+                trace.append((time.perf_counter() - t0, [list(r) for r in best_routes]))
 
-    for _ in range(n_generations):
-        order = np.argsort(fit)[::-1]
-        new_pop = [pop[int(order[0])].copy(), pop[int(order[1])].copy()]
-        new_fit = [fit[int(order[0])], fit[int(order[1])]]
+    if not stop and len(fit) >= 2:
+        for _ in range(n_generations):
+            order = np.argsort(fit)[::-1]
+            new_pop = [pop[int(order[0])].copy(), pop[int(order[1])].copy()]
+            new_fit = [fit[int(order[0])], fit[int(order[1])]]
 
-        while len(new_pop) < pop_size:
-            i1, i2 = rng.choice(pop_size, size=2, replace=False)
-            p1 = pop[int(i1 if fit[i1] >= fit[i2] else i2)]
-            j1, j2 = rng.choice(pop_size, size=2, replace=False)
-            p2 = pop[int(j1 if fit[j1] >= fit[j2] else j2)]
+            while len(new_pop) < pop_size:
+                if _over_budget(t0, evals, time_limit, max_evals):
+                    stop = True
+                    break
+                i1, i2 = rng.choice(len(fit), size=2, replace=False)
+                p1 = pop[int(i1 if fit[i1] >= fit[i2] else i2)]
+                j1, j2 = rng.choice(len(fit), size=2, replace=False)
+                p2 = pop[int(j1 if fit[j1] >= fit[j2] else j2)]
 
-            if rng.random() < crossover_prob:
-                mask = rng.random(inst.w.shape) < 0.5
-                child = np.where(mask, p1, p2)
-            else:
-                child = p1.copy()
+                if rng.random() < crossover_prob:
+                    mask = rng.random(inst.w.shape) < 0.5
+                    child = np.where(mask, p1, p2)
+                else:
+                    child = p1.copy()
 
-            if rng.random() < mutation_prob:
-                mut_mask = rng.random(inst.w.shape) < 0.15
-                child = np.where(
-                    mut_mask, child * rng.uniform(0.6, 1.5, size=inst.w.shape), child)
+                if rng.random() < mutation_prob:
+                    mut_mask = rng.random(inst.w.shape) < 0.15
+                    child = np.where(
+                        mut_mask, child * rng.uniform(0.6, 1.5, size=inst.w.shape), child)
 
-            rds = _decode(inst, child, r_th)
-            f_c = float(evaluate(inst, rds)["f"])
-            new_pop.append(child)
-            new_fit.append(f_c)
-            if f_c > best_f:
-                best_f, best_routes = f_c, rds
+                rds = _decode(inst, child, r_th)
+                evals += 1
+                f_c = float(evaluate(inst, rds)["f"])
+                new_pop.append(child)
+                new_fit.append(f_c)
+                if f_c > best_f:
+                    best_f, best_routes = f_c, rds
+                    if trace is not None:
+                        trace.append((time.perf_counter() - t0, [list(r) for r in best_routes]))
 
-        pop, fit = new_pop, new_fit
+            if stop:
+                break
+            pop, fit = new_pop, new_fit
 
     return Solution("GA", best_routes, best_routes)
 
@@ -141,7 +177,17 @@ def _default_seeds(inst: Instance, H: np.ndarray) -> List[List[List[Cell]]]:
     return [svrec(inst).routes, na_greedy(inst).routes, heu_greedy(inst).routes, h_first(inst, H).routes]
 
 
-def _init_pop(inst, H, r_th, rng, pop_size, seeds) -> List[_Ind]:
+def _init_pop(
+    inst,
+    H,
+    r_th,
+    rng,
+    pop_size,
+    seeds,
+    t0: Optional[float] = None,
+    time_limit: Optional[float] = None,
+    max_evals: Optional[int] = None,
+) -> Tuple[List[_Ind], int, bool]:
     """Quần thể xoay quanh w (như ga gốc); mỗi nghiệm seed bơm kinh nghiệm x1.35 vào một cá thể."""
     pop = [_Ind(inst.w.copy(), 1.0)]
     for r in seeds:
@@ -153,7 +199,17 @@ def _init_pop(inst, H, r_th, rng, pop_size, seeds) -> List[_Ind]:
     while len(pop) < pop_size:
         pop.append(_Ind(inst.w * rng.uniform(0.7, 1.3,
                    size=inst.w.shape), float(rng.uniform(0.5, 1.5))))
-    return [_eval_ind(inst, H, r_th, i) for i in pop[:pop_size]]
+    out: List[_Ind] = []
+    evals = 0
+    stop = False
+    t_start = time.perf_counter() if t0 is None else t0
+    for i in pop[:pop_size]:
+        if _over_budget(t_start, evals, time_limit, max_evals):
+            stop = True
+            break
+        out.append(_eval_ind(inst, H, r_th, i))
+        evals += 1
+    return out, evals, stop
 
 
 def _vary(inst, H, rng, p1: _Ind, p2: _Ind, crossover_prob, mutation_prob,
@@ -190,29 +246,47 @@ def _vary(inst, H, rng, p1: _Ind, p2: _Ind, crossover_prob, mutation_prob,
 def ga_scalar(inst: Instance, H: np.ndarray, w_cov: float = 1.0, w_ben: float = 0.0, pop_size: int = 12,
               n_generations: int = 12, crossover_prob: float = 0.85, mutation_prob: float = 0.40,
               seed: int = 42, seeds: Optional[Sequence[List[List[Cell]]]] = None,
-              block_xover: bool = True, corridor_mut: bool = True) -> _Ind:
+              block_xover: bool = True, corridor_mut: bool = True,
+              time_limit: Optional[float] = None, max_evals: Optional[int] = None,
+              trace: Optional[list] = None) -> _Ind:
     """GA đơn mục tiêu cực đại hoá w_cov*fcov_norm + w_ben*fben_norm (giữ khung ga gốc: elitism 2,
     giải đấu 2). (1,0)/(0,1): tối ưu riêng từng mục tiêu cho kiểm tra xung đột; (a,b): GA có trọng số.
     Trả về cá thể tốt nhất (có .routes, .objs)."""
+    t0 = time.perf_counter()
     rng = np.random.default_rng(seed)
     r_th = float(inst.w.mean())
     seeds = _default_seeds(inst, H) if seeds is None else seeds
     def fitf(i): return w_cov * i.objs[0] + w_ben * i.objs[1]
-    pop = _init_pop(inst, H, r_th, rng, pop_size, seeds)
-    for _ in range(n_generations):
-        pop.sort(key=fitf, reverse=True)
-        new_pop = pop[:2]
-        while len(new_pop) < pop_size:
-            ps = []
-            for _ in range(2):
-                a, b = rng.choice(pop_size, size=2, replace=False)
-                ps.append(pop[int(a)] if fitf(pop[int(a)]) >=
-                          fitf(pop[int(b)]) else pop[int(b)])
-            child = _vary(
-                inst, H, rng, ps[0], ps[1], crossover_prob, mutation_prob, block_xover, corridor_mut)
-            new_pop.append(_eval_ind(inst, H, r_th, child))
-        pop = new_pop
-    return max(pop, key=fitf)
+    pop, evals, stop = _init_pop(inst, H, r_th, rng, pop_size, seeds, t0, time_limit, max_evals)
+    best_ind = max(pop, key=fitf)
+    if trace is not None:
+        trace.append((time.perf_counter() - t0, best_ind.objs))
+    if not stop and len(pop) >= 2:
+        for _ in range(n_generations):
+            pop.sort(key=fitf, reverse=True)
+            new_pop = pop[:2]
+            while len(new_pop) < pop_size:
+                if _over_budget(t0, evals, time_limit, max_evals):
+                    stop = True
+                    break
+                ps = []
+                for _ in range(2):
+                    a, b = rng.choice(len(pop), size=2, replace=False)
+                    ps.append(pop[int(a)] if fitf(pop[int(a)]) >=
+                              fitf(pop[int(b)]) else pop[int(b)])
+                child = _vary(
+                    inst, H, rng, ps[0], ps[1], crossover_prob, mutation_prob, block_xover, corridor_mut)
+                c_ind = _eval_ind(inst, H, r_th, child)
+                new_pop.append(c_ind)
+                evals += 1
+                if fitf(c_ind) > fitf(best_ind):
+                    best_ind = c_ind
+                    if trace is not None:
+                        trace.append((time.perf_counter() - t0, best_ind.objs))
+            pop = new_pop
+            if stop:
+                break
+    return best_ind
 
 
 def _rank_crowd(pop: List[_Ind]) -> List[List[int]]:
@@ -228,18 +302,27 @@ def _rank_crowd(pop: List[_Ind]) -> List[List[int]]:
 def nsga2(inst: Instance, H: np.ndarray, pop_size: int = 30, n_generations: int = 30,
           crossover_prob: float = 0.85, mutation_prob: float = 0.40, seed: int = 42,
           seeds: Optional[Sequence[List[List[Cell]]]] = None, block_xover: bool = True,
-          corridor_mut: bool = True, archive_cap: int = 40) -> Tuple[ParetoArchive, List[float]]:
+          corridor_mut: bool = True, archive_cap: int = 40,
+          time_limit: Optional[float] = None, max_evals: Optional[int] = None,
+          trace: Optional[list] = None) -> Tuple[ParetoArchive, List[float]]:
     """NSGA-II cho (fcov, fben). Seed quần thể (và archive) bằng svrec, na_greedy, heu_greedy, h_first.
     Trả về (archive Pareto của mọi nghiệm đã gặp, lịch sử Hypervolume theo thế hệ). Gợi ý: P=30-40, G=30-50."""
+    t0 = time.perf_counter()
     rng = np.random.default_rng(seed)
     r_th = float(inst.w.mean())
     seeds = _default_seeds(inst, H) if seeds is None else seeds
     arch, hist = ParetoArchive(archive_cap), []
     for r in seeds:
         arch.add(evaluate(inst, r, H)["objs"], r)
-    pop = _init_pop(inst, H, r_th, rng, pop_size, seeds)
+    if trace is not None:
+        trace.append((0.0, arch.points().copy()))
+    pop, evals, stop = _init_pop(inst, H, r_th, rng, pop_size, seeds, t0, time_limit, max_evals)
     for i in pop:
-        arch.add(i.objs, i.routes)
+        if arch.add(i.objs, i.routes) and trace is not None:
+            trace.append((time.perf_counter() - t0, arch.points().copy()))
+    if stop or len(pop) < 2:
+        hist.append(hypervolume_2d(arch.points()))
+        return arch, hist
     _rank_crowd(pop)
 
     def tour() -> _Ind:
@@ -248,11 +331,20 @@ def nsga2(inst: Instance, H: np.ndarray, pop_size: int = 30, n_generations: int 
         return a if (a.rank, -a.cd) < (b.rank, -b.cd) else b
 
     for _ in range(n_generations):
-        kids = [_eval_ind(inst, H, r_th, _vary(inst, H, rng, tour(), tour(), crossover_prob,
+        kids = []
+        for _ in range(pop_size):
+            if _over_budget(t0, evals, time_limit, max_evals):
+                stop = True
+                break
+            k = _eval_ind(inst, H, r_th, _vary(inst, H, rng, tour(), tour(), crossover_prob,
                                                mutation_prob, block_xover, corridor_mut))
-                for _ in range(pop_size)]
-        for k in kids:
-            arch.add(k.objs, k.routes)
+            evals += 1
+            if arch.add(k.objs, k.routes) and trace is not None:
+                trace.append((time.perf_counter() - t0, arch.points().copy()))
+            kids.append(k)
+        if stop:
+            hist.append(hypervolume_2d(arch.points()))
+            break
         merged = pop + kids
         fronts = _rank_crowd(merged)
         nxt: List[_Ind] = []
